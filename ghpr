@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""ghpr — one-call PR merge-safety read for agents.
+
+Collapses the "read every bot review + check every gate before merge" dance into a
+single structured call: all reviews (with bodies), all check runs, mergeable state,
+and a computed BLOCKED/READY verdict with reasons. Shells out to `gh` — zero auth code.
+
+    ghpr <number> [--repo owner/name] [--json]
+
+Exit 0 always on a successful read; the verdict lives in the payload (`ready`), not the
+exit code — reading a blocked PR is not an error. Exit 2 gh-not-authed, 3 PR not found.
+"""
+import argparse
+import json
+import subprocess
+import sys
+
+PR_FIELDS = ",".join([
+    "number", "title", "state", "url", "isDraft", "mergeable",
+    "mergeStateStatus", "reviewDecision", "reviews", "comments", "statusCheckRollup",
+])
+
+FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}
+PASS_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+
+
+class GhprError(Exception):
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code = code
+        self.msg = msg
+
+
+def gh(args):
+    p = subprocess.run(["gh"] + args, capture_output=True, text=True)
+    if p.returncode != 0:
+        err = (p.stderr or "").strip()
+        low = err.lower()
+        if "auth" in low or "not logged" in low:
+            raise GhprError(2, f"gh not authenticated: {err}")
+        if ("not found" in low or "404" in low or "no pull requests found" in low
+                or "could not resolve" in low):
+            raise GhprError(3, f"PR not found: {err}")
+        raise GhprError(1, f"gh {' '.join(args)} failed: {err}")
+    return p.stdout
+
+
+def _check_state(c):
+    """Normalize a statusCheckRollup entry → ('pass'|'fail'|'pending', name)."""
+    name = c.get("name") or c.get("context") or "?"
+    concl = (c.get("conclusion") or "").upper()
+    status = (c.get("status") or "").upper()
+    state = (c.get("state") or "").upper()  # StatusContext uses `state`
+    if concl in FAIL_CONCLUSIONS or state in {"FAILURE", "ERROR"}:
+        return "fail", name
+    if concl in PASS_CONCLUSIONS or state == "SUCCESS":
+        return "pass", name
+    if status in {"COMPLETED"} and concl in PASS_CONCLUSIONS:
+        return "pass", name
+    return "pending", name
+
+
+def evaluate(pr):
+    """Pure verdict function over `gh pr view --json` output → structured summary."""
+    checks = {"pass": [], "fail": [], "pending": []}
+    for c in pr.get("statusCheckRollup") or []:
+        kind, name = _check_state(c)
+        checks[kind].append(name)
+
+    reviews = []
+    for r in pr.get("reviews") or []:
+        reviews.append({
+            "author": (r.get("author") or {}).get("login", "?"),
+            "state": r.get("state"),
+            "body": (r.get("body") or "").strip(),
+        })
+
+    state = pr.get("state")
+    rd = pr.get("reviewDecision")
+    mss = pr.get("mergeStateStatus")
+    reasons = []
+    # Merge-blocking reasons only make sense for an OPEN PR; MERGED/CLOSED are terminal.
+    if state == "OPEN":
+        if pr.get("isDraft"):
+            reasons.append("PR is a draft (bots skip drafts)")
+        if checks["fail"]:
+            reasons.append(f"{len(checks['fail'])} check(s) failing: {', '.join(checks['fail'])}")
+        if checks["pending"]:
+            reasons.append(f"{len(checks['pending'])} check(s) pending")
+        if rd == "CHANGES_REQUESTED":
+            reasons.append("changes requested")
+        elif rd == "REVIEW_REQUIRED":
+            reasons.append("required review not yet approved")
+        if mss == "DIRTY" or pr.get("mergeable") == "CONFLICTING":
+            reasons.append("merge conflicts")
+        elif mss == "BEHIND":
+            reasons.append("branch behind base")
+
+    if state == "MERGED":
+        status = "merged"
+    elif state == "CLOSED":
+        status = "closed"
+    elif state == "OPEN" and not reasons:
+        status = "ready"
+    else:
+        status = "blocked"
+
+    return {
+        "status": status,
+        "number": pr.get("number"),
+        "title": pr.get("title"),
+        "state": state,
+        "url": pr.get("url"),
+        "mergeable": pr.get("mergeable"),
+        "mergeStateStatus": mss,
+        "reviewDecision": rd,
+        "checks": {k: v for k, v in checks.items()},
+        "check_counts": {k: len(v) for k, v in checks.items()},
+        "reviews": reviews,
+        "comments": [
+            {"author": (c.get("author") or {}).get("login", "?"), "body": (c.get("body") or "").strip()}
+            for c in (pr.get("comments") or [])
+        ],
+        "blocking": reasons,
+        "ready": state == "OPEN" and not reasons,
+    }
+
+
+def human(s):
+    out = []
+    cc = s["check_counts"]
+    head = f"#{s['number']} {s['title']}"
+    verdict = {"ready": "READY ✓", "blocked": "BLOCKED", "merged": "MERGED ✓",
+               "closed": "CLOSED"}.get(s["status"], s["status"].upper())
+    out.append(f"{head}")
+    out.append(
+        f"{s['state']} · {verdict} · mergeState={s['mergeStateStatus']} "
+        f"reviewDecision={s['reviewDecision'] or 'none'}"
+    )
+    out.append(f"checks: {cc['pass']}✓ {cc['pending']}⏳ {cc['fail']}✗"
+               + (f"  (failing: {', '.join(s['checks']['fail'])})" if s['checks']['fail'] else ""))
+    if s["reviews"]:
+        out.append("reviews:")
+        for r in s["reviews"]:
+            body = r["body"].replace("\n", " ")
+            preview = (body[:140] + "…") if len(body) > 140 else body
+            out.append(f"  {r['author']} [{r['state']}] {preview}")
+    if s["blocking"]:
+        out.append("BLOCKED: " + "; ".join(s["blocking"]))
+    return "\n".join(out)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="ghpr", description="One-call PR merge-safety read.")
+    ap.add_argument("number", help="PR number")
+    ap.add_argument("--repo", help="owner/name (defaults to cwd repo)")
+    ap.add_argument("--json", action="store_true", help="emit a bare JSON object")
+    args = ap.parse_args(argv)
+    call = ["pr", "view", args.number, "--json", PR_FIELDS]
+    if args.repo:
+        call += ["--repo", args.repo]
+    try:
+        pr = json.loads(gh(call))
+        summary = evaluate(pr)
+    except GhprError as e:
+        print(e.msg, file=sys.stderr)
+        return e.code
+    print(json.dumps(summary) if args.json else human(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
