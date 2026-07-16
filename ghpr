@@ -190,8 +190,18 @@ def human(s):
     return "\n".join(out)
 
 
+class _Parser(argparse.ArgumentParser):
+    """Usage errors exit 1 (general), not argparse's default 2 — exit 2 is
+    documented to mean gh-not-authed and must never fire for a bad flag."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="ghpr", description="One-call PR merge-safety read.")
+    ap = _Parser(prog="ghpr", description="One-call PR merge-safety read.")
     ap.add_argument("number", nargs="?", help="PR number")
     ap.add_argument("--repo", help="owner/name (defaults to cwd repo)")
     ap.add_argument("--json", action="store_true", help="emit a bare JSON object")

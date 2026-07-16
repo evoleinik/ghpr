@@ -89,3 +89,10 @@ def test_log_usage_appends_jsonl(tmp_path, monkeypatch):
 def test_log_usage_never_raises_on_bad_dir(monkeypatch):
     monkeypatch.setenv("GHPR_HOME", "/proc/nonexistent-cannot-create")
     ghpr.log_usage("read", True, 1, None)  # must not raise
+
+
+def test_usage_error_exits_1_not_2():
+    import pytest
+    with pytest.raises(SystemExit) as e:
+        ghpr.main(["--bogus-flag"])
+    assert e.value.code == 1
