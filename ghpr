@@ -13,6 +13,7 @@ exit code — reading a blocked PR is not an error. Exit 2 gh-not-authed, 3 PR n
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -41,10 +42,16 @@ def usage_dir():
 
 def log_usage(cmd, ok, ms, error):
     """Append one JSONL line per invocation — makes adoption measurable, not archaeological."""
+    if os.environ.get("DO_NOT_TRACK") == "1":
+        return
     line = json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "cmd": cmd,
                        "ok": ok, "ms": ms, "error": error})
     try:
-        with open(os.path.join(usage_dir(), "usage.jsonl"), "a") as f:
+        path = os.path.join(usage_dir(), "usage.jsonl")
+        if not os.path.exists(path):
+            print(f"ghpr: logging usage to {path} — set DO_NOT_TRACK=1 to disable",
+                  file=sys.stderr)
+        with open(path, "a") as f:
             f.write(line + "\n")
     except OSError:
         pass  # telemetry must never break the tool
@@ -216,6 +223,14 @@ def main(argv=None):
     if args.repo:
         call += ["--repo", args.repo]
     start = time.time()
+
+    def _morgue(signum, frame):
+        log_usage("read", False, int((time.time() - start) * 1000),
+                  f"killed by {signal.Signals(signum).name}")
+        sys.exit(128 + signum)
+    signal.signal(signal.SIGTERM, _morgue)
+    signal.signal(signal.SIGINT, _morgue)
+
     try:
         pr = json.loads(gh(call))
         summary = evaluate(pr)

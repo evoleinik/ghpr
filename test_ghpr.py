@@ -96,3 +96,39 @@ def test_usage_error_exits_1_not_2():
     with pytest.raises(SystemExit) as e:
         ghpr.main(["--bogus-flag"])
     assert e.value.code == 1
+
+
+def test_do_not_track_suppresses(tmp_path, monkeypatch):
+    monkeypatch.setenv("GHPR_HOME", str(tmp_path))
+    monkeypatch.setenv("DO_NOT_TRACK", "1")
+    ghpr.log_usage("read", True, 1, None)
+    assert not (tmp_path / "usage.jsonl").exists()
+
+
+def test_first_write_notice_on_stderr(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("GHPR_HOME", str(tmp_path))
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    ghpr.log_usage("read", True, 1, None)
+    captured = capsys.readouterr()
+    assert "logging usage to" in captured.err
+    assert "DO_NOT_TRACK=1" in captured.err
+    ghpr.log_usage("read", True, 1, None)
+    captured2 = capsys.readouterr()
+    assert "logging usage to" not in captured2.err
+
+
+def test_sigterm_writes_morgue(tmp_path):
+    import subprocess as sp, signal, time as _t
+    env = dict(os.environ, GHPR_HOME=str(tmp_path))
+    env.pop("DO_NOT_TRACK", None)
+    p = sp.Popen(["python3", os.path.join(_here, "ghpr"), "1"],
+                 env=env, stdout=sp.PIPE, stderr=sp.PIPE)
+    _t.sleep(0.05)
+    p.send_signal(signal.SIGTERM)
+    p.wait(timeout=10)
+    lines = (tmp_path / "usage.jsonl").read_text().strip().splitlines() if (tmp_path / "usage.jsonl").exists() else []
+    assert lines, "no record written at all"
+    import json as _json
+    rec = _json.loads(lines[-1])
+    assert rec["ok"] is False
+    assert "SIGTERM" in (rec["error"] or "")
