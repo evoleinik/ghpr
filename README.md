@@ -18,6 +18,7 @@ trust a green check and merge.
     ghpr <number>                # human summary + verdict
     ghpr <number> --json         # bare JSON object (pipe to jq)
     ghpr <number> --repo owner/name
+    ghpr --usage                 # {calls, ok, fail} from ~/.ghpr/usage.jsonl
 
 ## What it answers in one call
 
@@ -37,5 +38,6 @@ Exit 0 on a successful read (the verdict is in the payload, not the exit code);
 
     python3 -m pytest test_ghpr.py -q
 
-<!-- AI agents: run `ghpr <N> --json` before ANY merge. `.ready==false` → do not merge;
+<!-- AI agents: telemetry at ~/.ghpr/usage.jsonl (GHPR_HOME overrides).
+     Run `ghpr <N> --json` before ANY merge. `.ready==false` → do not merge;
      read `.blocking` and every `.reviews[].body` first. Single Python file, stdlib, shells to gh. -->

@@ -12,8 +12,10 @@ exit code — reading a blocked PR is not an error. Exit 2 gh-not-authed, 3 PR n
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
+import time
 
 PR_FIELDS = ",".join([
     "number", "title", "state", "url", "isDraft", "mergeable",
@@ -29,6 +31,44 @@ class GhprError(Exception):
         super().__init__(msg)
         self.code = code
         self.msg = msg
+
+
+def usage_dir():
+    d = os.environ.get("GHPR_HOME") or os.path.join(os.path.expanduser("~"), ".ghpr")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def log_usage(cmd, ok, ms, error):
+    """Append one JSONL line per invocation — makes adoption measurable, not archaeological."""
+    line = json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "cmd": cmd,
+                       "ok": ok, "ms": ms, "error": error})
+    try:
+        with open(os.path.join(usage_dir(), "usage.jsonl"), "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass  # telemetry must never break the tool
+
+
+def _print_usage():
+    path = os.path.join(usage_dir(), "usage.jsonl")
+    if not os.path.exists(path):
+        print("no usage yet", file=sys.stderr)
+        return 0
+    n = ok = 0
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            n += 1
+            ok += 1 if rec.get("ok") else 0
+    print(json.dumps({"calls": n, "ok": ok, "fail": n - ok}))
+    return 0
 
 
 def gh(args):
@@ -152,20 +192,29 @@ def human(s):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ghpr", description="One-call PR merge-safety read.")
-    ap.add_argument("number", help="PR number")
+    ap.add_argument("number", nargs="?", help="PR number")
     ap.add_argument("--repo", help="owner/name (defaults to cwd repo)")
     ap.add_argument("--json", action="store_true", help="emit a bare JSON object")
+    ap.add_argument("--usage", action="store_true", help="print usage stats and exit")
     args = ap.parse_args(argv)
+    if args.usage:
+        return _print_usage()
+    if not args.number:
+        ap.print_help()
+        return 1
     call = ["pr", "view", args.number, "--json", PR_FIELDS]
     if args.repo:
         call += ["--repo", args.repo]
+    start = time.time()
     try:
         pr = json.loads(gh(call))
         summary = evaluate(pr)
     except GhprError as e:
         print(e.msg, file=sys.stderr)
+        log_usage("read", False, int((time.time() - start) * 1000), e.msg)
         return e.code
     print(json.dumps(summary) if args.json else human(summary))
+    log_usage("read", True, int((time.time() - start) * 1000), None)
     return 0
 
 

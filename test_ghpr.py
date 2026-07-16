@@ -73,3 +73,19 @@ def test_reviews_carry_author_state_body():
 def test_draft_blocks():
     s = ghpr.evaluate(_pr(isDraft=True, mergeStateStatus="DRAFT"))
     assert s["status"] == "blocked" and any("draft" in r for r in s["blocking"])
+
+
+def test_log_usage_appends_jsonl(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("GHPR_HOME", str(tmp_path))
+    ghpr.log_usage("read", True, 42, None)
+    ghpr.log_usage("read", False, 7, "PR not found")
+    lines = (tmp_path / "usage.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["cmd"] == "read"
+    assert json.loads(lines[1])["ok"] is False
+
+
+def test_log_usage_never_raises_on_bad_dir(monkeypatch):
+    monkeypatch.setenv("GHPR_HOME", "/proc/nonexistent-cannot-create")
+    ghpr.log_usage("read", True, 1, None)  # must not raise
