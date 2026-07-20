@@ -132,3 +132,66 @@ def test_sigterm_writes_morgue(tmp_path):
     rec = _json.loads(lines[-1])
     assert rec["ok"] is False
     assert "SIGTERM" in (rec["error"] or "")
+
+
+# --- latest-run-wins (the airshelf#1192 phantom blocker) --------------------
+
+
+def _run(name, conclusion, started, typename="CheckRun"):
+    return {"__typename": typename, "name": name, "status": "COMPLETED",
+            "conclusion": conclusion, "startedAt": started}
+
+
+def test_rerun_supersedes_the_stale_failure():
+    """THE REGRESSION TEST. GitHub counts the latest run per name; so must we, or a
+    green re-run reads as a failing check and the PR looks unmergeable."""
+    pr = _pr(statusCheckRollup=[
+        _run("curation", "FAILURE", "2026-07-20T13:28:32Z"),
+        _run("curation", "SUCCESS", "2026-07-20T13:46:26Z"),
+    ])
+    s = ghpr.evaluate(pr)
+    assert s["check_counts"] == {"pass": 1, "fail": 0, "pending": 0}
+    assert s["blocking"] == [] and s["ready"] is True
+
+
+def test_a_rerun_that_went_red_still_blocks():
+    """Latest-wins cuts both ways: a green run does not immunize a later failure."""
+    pr = _pr(mergeStateStatus="BLOCKED", statusCheckRollup=[
+        _run("ci", "SUCCESS", "2026-07-20T13:00:00Z"),
+        _run("ci", "FAILURE", "2026-07-20T14:00:00Z"),
+    ])
+    s = ghpr.evaluate(pr)
+    assert s["check_counts"]["fail"] == 1 and s["status"] == "blocked"
+
+
+def test_in_flight_rerun_beats_an_older_completed_run():
+    """A re-run in progress is the live state of that check, not the old verdict."""
+    pr = _pr(statusCheckRollup=[
+        _run("ci", "SUCCESS", "2026-07-20T13:00:00Z"),
+        {"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS",
+         "conclusion": None, "startedAt": "2026-07-20T14:00:00Z"},
+    ])
+    s = ghpr.evaluate(pr)
+    assert s["check_counts"] == {"pass": 0, "fail": 0, "pending": 1}
+
+
+def test_distinct_checks_are_never_collapsed():
+    pr = _pr(mergeStateStatus="BLOCKED", statusCheckRollup=[
+        _run("lint", "SUCCESS", "2026-07-20T13:00:00Z"),
+        _run("test", "FAILURE", "2026-07-20T13:00:00Z"),
+        {"__typename": "StatusContext", "context": "Vercel", "state": "SUCCESS",
+         "startedAt": "2026-07-20T13:00:00Z"},
+    ])
+    s = ghpr.evaluate(pr)
+    assert s["check_counts"] == {"pass": 2, "fail": 1, "pending": 0}
+
+
+def test_entries_without_timestamps_keep_list_order():
+    """Older gh versions / odd payloads omit startedAt -- last one listed wins,
+    which matches how the rollup is ordered, instead of throwing."""
+    pr = _pr(mergeStateStatus="BLOCKED", statusCheckRollup=[
+        {"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"},
+    ])
+    s = ghpr.evaluate(pr)
+    assert s["check_counts"]["fail"] == 1

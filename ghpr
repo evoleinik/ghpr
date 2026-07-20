@@ -107,10 +107,37 @@ def _check_state(c):
     return "pending", name
 
 
+def _latest_per_name(entries):
+    """Keep only the most recent run of each check name.
+
+    GitHub evaluates the LATEST run per check name -- a re-run supersedes its
+    predecessor -- but `gh` hands back every run that ever posted against the head
+    sha. Counting them all reports a check as failing long after the re-run went
+    green, which is exactly backwards for a tool whose job is "is it safe to
+    merge": it manufactures a phantom blocker on a mergeable PR, and an agent that
+    believes it sits there waiting for a fix that already landed.
+
+    Live case (airshelf#1192): `curation` failed at 13:28, the PR body gained its
+    curation directive, the re-run passed at 13:46 -- GitHub said CLEAN, ghpr said
+    "1 check(s) failing: curation".
+
+    A still-running re-run also wins over an older completed one, which is right:
+    the newer run is the live state of that check, not the stale verdict.
+    """
+    latest = {}
+    for i, c in enumerate(entries):
+        key = c.get("name") or c.get("context") or "?"
+        # (timestamp, index): missing startedAt sorts first, list order breaks ties.
+        stamp = (c.get("startedAt") or "", i)
+        if key not in latest or stamp >= latest[key][0]:
+            latest[key] = (stamp, c)
+    return [c for _, c in latest.values()]
+
+
 def evaluate(pr):
     """Pure verdict function over `gh pr view --json` output → structured summary."""
     checks = {"pass": [], "fail": [], "pending": []}
-    for c in pr.get("statusCheckRollup") or []:
+    for c in _latest_per_name(pr.get("statusCheckRollup") or []):
         kind, name = _check_state(c)
         checks[kind].append(name)
 

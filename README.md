@@ -31,6 +31,12 @@ can't merge (failing/pending checks, changes-requested, review-required, conflic
 behind-base). Every bot review body is in `reviews` — so an agent can't merge without
 having surfaced the review it was supposed to read.
 
+Checks are **deduped to the latest run per name**, matching how GitHub itself decides.
+`gh` returns every run posted against the head sha, so a check that failed and was then
+re-run green appears twice; counting both invents a blocker on a PR GitHub already calls
+CLEAN. Latest-wins cuts both ways — a green run does not immunize a later failure, and a
+re-run still in flight outranks an older completed one.
+
 Exit 0 on a successful read (the verdict is in the payload, not the exit code);
 2 = gh not authed, 3 = PR not found.
 
