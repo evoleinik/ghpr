@@ -5,10 +5,10 @@ every gate before merging" dance into a single structured call: all reviews (wit
 bodies), every check run, mergeable state, and a computed **BLOCKED / READY** verdict
 with reasons. Shells out to `gh` — zero auth code, reuses your existing login.
 
-Third of a stateless trio — `gitx` writes (commit to any branch/repo with no checkout),
-`gitw` orients (where am I, in one read), and `ghpr` is the *pre-merge read*: the thing
-you run before you trust a green check and merge. `gitx` and `gitw` aren't published
-yet, so they're named here without links rather than with broken ones.
+Third of a stateless trio — [`gitx`](https://github.com/evoleinik/gitx) writes (commit to
+any branch/repo with no checkout), [`gitw`](https://github.com/evoleinik/gitw) orients
+(where am I, in one read), and `ghpr` is the *pre-merge read*: the thing you run before
+you trust a green check and merge.
 
 ## Install
 
