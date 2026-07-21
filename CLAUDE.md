@@ -9,7 +9,8 @@ check state + a merge verdict in one call, so "green check but a review said no"
 - `.status` ∈ `ready` · `blocked` · `merged` · `closed`.
 - `.checks.fail` / `.checks.pending` name the specific gates; `.reviewDecision` is the
   required-review state.
-- Exit 3 = PR not found, 2 = gh not authed.
+- Exit 3 = PR not found, 2 = gh not authed, 4 = transient (network/rate-limit/5xx) after
+  2 retries with backoff — a poller must back off and retry, never read it as a verdict.
 
 Read-only. To open/merge a PR use `gitx pr`; to know which branch you're on use `gitw`.
 `ghpr` is the gate you read before you trust a merge.

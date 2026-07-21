@@ -39,7 +39,13 @@ CLEAN. Latest-wins cuts both ways — a green run does not immunize a later fail
 re-run still in flight outranks an older completed one.
 
 Exit 0 on a successful read (the verdict is in the payload, not the exit code);
-2 = gh not authed, 3 = PR not found.
+2 = gh not authed, 3 = PR not found, 4 = transient failure (network / rate limit / 5xx)
+after retries.
+
+**Exit 4 is the one a polling caller must handle.** A network blip is weather, not a
+verdict: transient causes are retried twice with backoff, and only then reported — under
+their own code so a loop can back off instead of mistaking silence for "no change". Auth
+and not-found are never retried; they are facts about the world, not the connection.
 
 ## Test
 

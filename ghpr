@@ -8,7 +8,9 @@ and a computed BLOCKED/READY verdict with reasons. Shells out to `gh` — zero a
     ghpr <number> [--repo owner/name] [--json]
 
 Exit 0 always on a successful read; the verdict lives in the payload (`ready`), not the
-exit code — reading a blocked PR is not an error. Exit 2 gh-not-authed, 3 PR not found.
+exit code — reading a blocked PR is not an error. Exit 2 gh-not-authed, 3 PR not found,
+4 transient (network/rate-limit/5xx) after retries — a poller should back off and retry,
+not treat it as a verdict.
 """
 import argparse
 import json
@@ -78,18 +80,47 @@ def _print_usage():
     return 0
 
 
-def gh(args):
-    p = subprocess.run(["gh"] + args, capture_output=True, text=True)
-    if p.returncode != 0:
+# A read that fails because the network hiccuped is not a verdict, and it is not the
+# same class of event as "this PR does not exist". Both used to exit 1, so a polling
+# caller that discarded stderr saw only silence and kept spinning — a real 20-minute
+# loop died this way on a blip lasting seconds. Transient causes are retried, then
+# reported under their own exit code so a caller can back off deliberately.
+TRANSIENT_MARKERS = (
+    "error connecting", "connection refused", "connection reset", "no such host",
+    "temporary failure in name resolution", "timeout", "timed out", "eof",
+    "tls handshake", "handshake failure", "rate limit", "secondary rate",
+    "server error", "bad gateway", "service unavailable", "gateway timeout",
+    " 500 ", " 502 ", " 503 ", " 504 ",
+)
+GH_RETRIES = 2          # total attempts = GH_RETRIES + 1
+GH_BACKOFF_S = 1.5      # multiplied by attempt number
+
+
+def _is_transient(err_lower):
+    return any(m in err_lower for m in TRANSIENT_MARKERS)
+
+
+def gh(args, sleep=time.sleep):
+    last = ""
+    for attempt in range(GH_RETRIES + 1):
+        p = subprocess.run(["gh"] + args, capture_output=True, text=True)
+        if p.returncode == 0:
+            return p.stdout
         err = (p.stderr or "").strip()
         low = err.lower()
+        # Auth and not-found are verdicts about the world, not weather — never retry.
         if "auth" in low or "not logged" in low:
             raise GhprError(2, f"gh not authenticated: {err}")
         if ("not found" in low or "404" in low or "no pull requests found" in low
                 or "could not resolve" in low):
             raise GhprError(3, f"PR not found: {err}")
-        raise GhprError(1, f"gh {' '.join(args)} failed: {err}")
-    return p.stdout
+        if not _is_transient(low):
+            raise GhprError(1, f"gh {' '.join(args)} failed: {err}")
+        last = err
+        if attempt < GH_RETRIES:
+            sleep(GH_BACKOFF_S * (attempt + 1))
+    raise GhprError(4, f"transient failure after {GH_RETRIES + 1} attempts "
+                       f"— retry with backoff, do not treat as a verdict: {last}")
 
 
 def _check_state(c):

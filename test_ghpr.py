@@ -195,3 +195,84 @@ def test_entries_without_timestamps_keep_list_order():
     ])
     s = ghpr.evaluate(pr)
     assert s["check_counts"]["fail"] == 1
+
+
+# --- transient-failure handling -------------------------------------------
+# A network blip is not a verdict. These pin that it is retried, that it ends
+# up under its own exit code (4) rather than the generic 1, and that failures
+# which are NOT weather (auth, missing PR, real errors) are never retried.
+
+class _FakeRun:
+    """Scripts subprocess.run: each call pops one (returncode, stderr)."""
+
+    def __init__(self, outcomes, stdout='{"ok": 1}'):
+        self.outcomes = list(outcomes)
+        self.stdout_val = stdout
+        self.calls = 0
+
+    def __call__(self, *a, **kw):
+        self.calls += 1
+        code, err = self.outcomes.pop(0)
+        return type("P", (), {"returncode": code, "stdout": self.stdout_val, "stderr": err})()
+
+
+def _with_run(monkeypatch, fake):
+    monkeypatch.setattr(ghpr.subprocess, "run", fake)
+    return []
+
+
+def test_transient_network_error_is_retried_then_succeeds(monkeypatch):
+    fake = _FakeRun([(1, "error connecting to api.github.com"), (0, "")])
+    monkeypatch.setattr(ghpr.subprocess, "run", fake)
+    slept = []
+    out = ghpr.gh(["pr", "view", "1"], sleep=slept.append)
+    assert out == '{"ok": 1}'
+    assert fake.calls == 2          # retried exactly once before succeeding
+    assert slept and slept[0] > 0   # and backed off before retrying
+
+
+def test_persistent_transient_failure_exits_4_not_1(monkeypatch):
+    import pytest
+    fake = _FakeRun([(1, "error connecting to api.github.com")] * (ghpr.GH_RETRIES + 1))
+    monkeypatch.setattr(ghpr.subprocess, "run", fake)
+    with pytest.raises(ghpr.GhprError) as e:
+        ghpr.gh(["pr", "view", "1"], sleep=lambda _s: None)
+    assert e.value.code == 4, "a poller must be able to tell 'retry me' from 'broken'"
+    assert fake.calls == ghpr.GH_RETRIES + 1
+    assert "retry" in e.value.msg.lower()
+
+
+def test_rate_limit_counts_as_transient(monkeypatch):
+    import pytest
+    fake = _FakeRun([(1, "API rate limit exceeded for user")] * (ghpr.GH_RETRIES + 1))
+    monkeypatch.setattr(ghpr.subprocess, "run", fake)
+    with pytest.raises(ghpr.GhprError) as e:
+        ghpr.gh(["pr", "view", "1"], sleep=lambda _s: None)
+    assert e.value.code == 4
+
+
+def test_auth_failure_is_not_retried(monkeypatch):
+    import pytest
+    fake = _FakeRun([(1, "gh: not logged in to any hosts")])
+    monkeypatch.setattr(ghpr.subprocess, "run", fake)
+    with pytest.raises(ghpr.GhprError) as e:
+        ghpr.gh(["pr", "view", "1"], sleep=lambda _s: None)
+    assert e.value.code == 2 and fake.calls == 1
+
+
+def test_missing_pr_is_not_retried(monkeypatch):
+    import pytest
+    fake = _FakeRun([(1, "no pull requests found for branch")])
+    monkeypatch.setattr(ghpr.subprocess, "run", fake)
+    with pytest.raises(ghpr.GhprError) as e:
+        ghpr.gh(["pr", "view", "1"], sleep=lambda _s: None)
+    assert e.value.code == 3 and fake.calls == 1
+
+
+def test_real_error_still_exits_1_and_is_not_retried(monkeypatch):
+    import pytest
+    fake = _FakeRun([(1, "unknown flag: --nope")])
+    monkeypatch.setattr(ghpr.subprocess, "run", fake)
+    with pytest.raises(ghpr.GhprError) as e:
+        ghpr.gh(["pr", "view", "1"], sleep=lambda _s: None)
+    assert e.value.code == 1 and fake.calls == 1
